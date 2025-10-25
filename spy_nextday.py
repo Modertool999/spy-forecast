@@ -2,7 +2,10 @@
 import argparse
 import sys
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
+from threading import Lock
+from typing import Optional
 
 warnings.filterwarnings(
     "ignore",
@@ -22,6 +25,39 @@ from sklearn.preprocessing import StandardScaler
 
 pd.set_option("display.float_format", "{:.6f}".format)
 
+DEFAULT_HISTORY_START = pd.Timestamp("2000-01-01")
+_CACHE_DIR = Path(__file__).resolve().parent / ".cache"
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_CACHE_LOCK = Lock()
+_PRICE_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def _cache_file(ticker: str) -> Path:
+    safe = ticker.replace("/", "_").lower()
+    return _CACHE_DIR / f"{safe}_daily.csv"
+
+
+def _load_cached_frame(ticker: str) -> Optional[pd.DataFrame]:
+    with _CACHE_LOCK:
+        if ticker in _PRICE_CACHE:
+            return _PRICE_CACHE[ticker]
+    path = _cache_file(ticker)
+    if not path.exists():
+        return None
+    df = pd.read_csv(path, index_col="Date", parse_dates=True)
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+    with _CACHE_LOCK:
+        _PRICE_CACHE[ticker] = df
+    return df
+
+
+def _persist_cache(ticker: str, df: pd.DataFrame) -> None:
+    path = _cache_file(ticker)
+    df.to_csv(path, index_label="Date")
+    with _CACHE_LOCK:
+        _PRICE_CACHE[ticker] = df
+
 
 def compute_rsi(series, window=14):
     delta = series.diff()
@@ -35,7 +71,7 @@ def compute_rsi(series, window=14):
     return rsi
 
 
-def download_price_data(ticker, start, end, retries=2):
+def _fetch_from_yahoo(ticker: str, start: str, end: str, retries: int = 2) -> pd.DataFrame:
     errors = []
     for attempt in range(retries):
         try:
@@ -50,7 +86,7 @@ def download_price_data(ticker, start, end, retries=2):
             )
             if not df.empty:
                 df.index = pd.to_datetime(df.index).tz_localize(None)
-                return df
+                return df.sort_index()
             errors.append(f"download attempt {attempt + 1}: empty frame")
         except Exception as exc:
             errors.append(f"download attempt {attempt + 1}: {exc}")
@@ -59,12 +95,49 @@ def download_price_data(ticker, start, end, retries=2):
         df_alt = ticker_obj.history(start=start, end=end, auto_adjust=True, interval="1d")
         if not df_alt.empty:
             df_alt.index = pd.to_datetime(df_alt.index).tz_localize(None)
-            return df_alt
+            return df_alt.sort_index()
         errors.append("ticker.history returned empty frame")
     except Exception as exc:
         errors.append(f"ticker.history error: {exc}")
     detail = "; ".join(errors) if errors else "unknown error"
     raise RuntimeError(f"Failed to download data for {ticker}. Details: {detail}")
+
+
+def download_price_data(ticker, start, end, retries=2):
+    start_ts = pd.Timestamp(start or DEFAULT_HISTORY_START)
+    end_ts = pd.Timestamp(end or datetime.today().strftime("%Y-%m-%d"))
+    if start_ts > end_ts:
+        raise ValueError(f"Start date {start_ts.date()} is after end date {end_ts.date()}.")
+    cached = _load_cached_frame(ticker)
+    if (
+        cached is not None
+        and cached.index.min() <= start_ts
+        and cached.index.max() >= end_ts
+    ):
+        return cached.loc[(cached.index >= start_ts) & (cached.index <= end_ts)].copy()
+
+    fetch_start = min(start_ts, DEFAULT_HISTORY_START)
+    fetch_end = end_ts + timedelta(days=1)
+    fresh = _fetch_from_yahoo(
+        ticker,
+        start=fetch_start.strftime("%Y-%m-%d"),
+        end=fetch_end.strftime("%Y-%m-%d"),
+        retries=retries,
+    )
+    if cached is not None:
+        combined = pd.concat([cached, fresh])
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    else:
+        combined = fresh
+    _persist_cache(ticker, combined)
+
+    if combined.index.min() > start_ts or combined.index.max() < end_ts:
+        raise RuntimeError(
+            f"Cached data for {ticker} does not cover requested window "
+            f"{start_ts.date()} - {end_ts.date()}."
+        )
+
+    return combined.loc[(combined.index >= start_ts) & (combined.index <= end_ts)].copy()
 
 
 def make_features(df):
