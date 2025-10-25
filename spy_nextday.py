@@ -116,20 +116,42 @@ def download_price_data(ticker, start, end, retries=2):
     ):
         return cached.loc[(cached.index >= start_ts) & (cached.index <= end_ts)].copy()
 
-    fetch_start = min(start_ts, DEFAULT_HISTORY_START)
-    fetch_end = end_ts + timedelta(days=1)
-    fresh = _fetch_from_yahoo(
-        ticker,
-        start=fetch_start.strftime("%Y-%m-%d"),
-        end=fetch_end.strftime("%Y-%m-%d"),
-        retries=retries,
-    )
-    if cached is not None:
-        combined = pd.concat([cached, fresh])
-        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    combined = cached.copy() if cached is not None else pd.DataFrame()
+    missing_segments = []
+
+    if cached is None:
+        segment_start = min(start_ts, DEFAULT_HISTORY_START)
+        missing_segments.append((segment_start, end_ts))
     else:
-        combined = fresh
-    _persist_cache(ticker, combined)
+        cache_start = cached.index.min()
+        cache_end = cached.index.max()
+        if start_ts < cache_start:
+            seg_start = min(start_ts, DEFAULT_HISTORY_START)
+            seg_end = cache_start - timedelta(days=1)
+            if seg_start <= seg_end:
+                missing_segments.append((seg_start, seg_end))
+        if end_ts > cache_end:
+            seg_start = cache_end + timedelta(days=1)
+            seg_end = end_ts
+            if seg_start <= seg_end:
+                missing_segments.append((seg_start, seg_end))
+
+    for seg_start, seg_end in missing_segments:
+        fresh = _fetch_from_yahoo(
+            ticker,
+            start=seg_start.strftime("%Y-%m-%d"),
+            end=(seg_end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            retries=retries,
+        )
+        combined = pd.concat([combined, fresh]) if not combined.empty else fresh
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+
+    if not missing_segments and combined.empty:
+        # We couldn't fetch anything new and have no cache to fall back to.
+        raise RuntimeError(f"No price data available for {ticker} in requested window.")
+
+    if not combined.empty:
+        _persist_cache(ticker, combined)
 
     if combined.index.min() > start_ts or combined.index.max() < end_ts:
         raise RuntimeError(
