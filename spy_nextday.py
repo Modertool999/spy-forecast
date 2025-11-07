@@ -3,8 +3,6 @@ import argparse
 import sys
 import warnings
 from datetime import datetime, timedelta
-from pathlib import Path
-from threading import Lock
 from typing import Optional
 
 warnings.filterwarnings(
@@ -23,40 +21,32 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_a
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from price_store import get_available_span, load_prices, upsert_prices
+
 pd.set_option("display.float_format", "{:.6f}".format)
 
 DEFAULT_HISTORY_START = pd.Timestamp("2000-01-01")
-_CACHE_DIR = Path(__file__).resolve().parent / ".cache"
-_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_CACHE_LOCK = Lock()
-_PRICE_CACHE: dict[str, pd.DataFrame] = {}
+_NO_DATA_HINTS = ("no price data", "possibly delisted", "yfpricesmissingerror", "empty frame")
 
 
-def _cache_file(ticker: str) -> Path:
-    safe = ticker.replace("/", "_").lower()
-    return _CACHE_DIR / f"{safe}_daily.csv"
+def _no_data_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(hint in msg for hint in _NO_DATA_HINTS)
 
 
-def _load_cached_frame(ticker: str) -> Optional[pd.DataFrame]:
-    with _CACHE_LOCK:
-        if ticker in _PRICE_CACHE:
-            return _PRICE_CACHE[ticker]
-    path = _cache_file(ticker)
-    if not path.exists():
-        return None
-    df = pd.read_csv(path, index_col="Date", parse_dates=True)
-    df.index = pd.to_datetime(df.index)
-    df = df.sort_index()
-    with _CACHE_LOCK:
-        _PRICE_CACHE[ticker] = df
+def _normalize_price_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(-1)
+    rename_map = {
+        "Adj Close": "Adj Close",
+        "Close": "Close",
+        "Open": "Open",
+        "High": "High",
+        "Low": "Low",
+        "Volume": "Volume",
+    }
+    df = df.rename(columns=rename_map)
     return df
-
-
-def _persist_cache(ticker: str, df: pd.DataFrame) -> None:
-    path = _cache_file(ticker)
-    df.to_csv(path, index_label="Date")
-    with _CACHE_LOCK:
-        _PRICE_CACHE[ticker] = df
 
 
 def compute_rsi(series, window=14):
@@ -86,7 +76,7 @@ def _fetch_from_yahoo(ticker: str, start: str, end: str, retries: int = 2) -> pd
             )
             if not df.empty:
                 df.index = pd.to_datetime(df.index).tz_localize(None)
-                return df.sort_index()
+                return _normalize_price_columns(df).sort_index()
             errors.append(f"download attempt {attempt + 1}: empty frame")
         except Exception as exc:
             errors.append(f"download attempt {attempt + 1}: {exc}")
@@ -95,7 +85,7 @@ def _fetch_from_yahoo(ticker: str, start: str, end: str, retries: int = 2) -> pd
         df_alt = ticker_obj.history(start=start, end=end, auto_adjust=True, interval="1d")
         if not df_alt.empty:
             df_alt.index = pd.to_datetime(df_alt.index).tz_localize(None)
-            return df_alt.sort_index()
+            return _normalize_price_columns(df_alt).sort_index()
         errors.append("ticker.history returned empty frame")
     except Exception as exc:
         errors.append(f"ticker.history error: {exc}")
@@ -103,28 +93,20 @@ def _fetch_from_yahoo(ticker: str, start: str, end: str, retries: int = 2) -> pd
     raise RuntimeError(f"Failed to download data for {ticker}. Details: {detail}")
 
 
-def download_price_data(ticker, start, end, retries=2):
+def download_price_data(ticker, start, end, retries=2, allow_remote=True):
     start_ts = pd.Timestamp(start or DEFAULT_HISTORY_START)
     end_ts = pd.Timestamp(end or datetime.today().strftime("%Y-%m-%d"))
     if start_ts > end_ts:
         raise ValueError(f"Start date {start_ts.date()} is after end date {end_ts.date()}.")
-    cached = _load_cached_frame(ticker)
-    if (
-        cached is not None
-        and cached.index.min() <= start_ts
-        and cached.index.max() >= end_ts
-    ):
-        return cached.loc[(cached.index >= start_ts) & (cached.index <= end_ts)].copy()
-
-    combined = cached.copy() if cached is not None else pd.DataFrame()
+    span = get_available_span(ticker)
     missing_segments = []
 
-    if cached is None:
+    if span is None:
+        cache_start = cache_end = None
         segment_start = min(start_ts, DEFAULT_HISTORY_START)
         missing_segments.append((segment_start, end_ts))
     else:
-        cache_start = cached.index.min()
-        cache_end = cached.index.max()
+        cache_start, cache_end = span
         if start_ts < cache_start:
             seg_start = min(start_ts, DEFAULT_HISTORY_START)
             seg_end = cache_start - timedelta(days=1)
@@ -136,30 +118,64 @@ def download_price_data(ticker, start, end, retries=2):
             if seg_start <= seg_end:
                 missing_segments.append((seg_start, seg_end))
 
-    for seg_start, seg_end in missing_segments:
-        fresh = _fetch_from_yahoo(
-            ticker,
-            start=seg_start.strftime("%Y-%m-%d"),
-            end=(seg_end + timedelta(days=1)).strftime("%Y-%m-%d"),
-            retries=retries,
+    if missing_segments and not allow_remote:
+        if span is None:
+            raise RuntimeError(
+                "Local price cache is empty. Run `python seed_prices.py --ticker SPY` "
+                "to populate the SQLite store before using cache-only mode."
+            )
+        missing_desc = ", ".join(f"{s.date()}-{e.date()}" for s, e in missing_segments)
+        raise ValueError(
+            f"Requested window {start_ts.date()} - {end_ts.date()} falls outside the cached span "
+            f"{cache_start.date()} - {cache_end.date()} (missing {missing_desc}). "
+            "Adjust the dates or refresh the cache via `python seed_prices.py`."
         )
-        combined = pd.concat([combined, fresh]) if not combined.empty else fresh
-        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
 
-    if not missing_segments and combined.empty:
-        # We couldn't fetch anything new and have no cache to fall back to.
-        raise RuntimeError(f"No price data available for {ticker} in requested window.")
+    if allow_remote:
+        for seg_start, seg_end in missing_segments:
+            cursor = seg_start
+            filled = False
+            while cursor <= seg_end:
+                try:
+                    fresh = _fetch_from_yahoo(
+                        ticker,
+                        start=cursor.strftime("%Y-%m-%d"),
+                        end=(seg_end + timedelta(days=1)).strftime("%Y-%m-%d"),
+                        retries=retries,
+                    )
+                except RuntimeError as exc:
+                    if _no_data_error(exc):
+                        cursor += timedelta(days=1)
+                        continue
+                    raise
+                if fresh.empty:
+                    cursor += timedelta(days=1)
+                    continue
+                upsert_prices(ticker, fresh)
+                filled = True
+                break
+            if not filled:
+                raise RuntimeError(
+                    f"Failed to backfill prices for {ticker} between "
+                    f"{seg_start.date()} and {seg_end.date()}."
+                )
 
-    if not combined.empty:
-        _persist_cache(ticker, combined)
-
-    if combined.index.min() > start_ts or combined.index.max() < end_ts:
+    frame = load_prices(ticker, start_ts, end_ts)
+    if frame.empty:
         raise RuntimeError(
-            f"Cached data for {ticker} does not cover requested window "
-            f"{start_ts.date()} - {end_ts.date()}."
+            f"No stored data available for {ticker} between {start_ts.date()} and {end_ts.date()}. "
+            "Refresh the cache with `python seed_prices.py`."
         )
-
-    return combined.loc[(combined.index >= start_ts) & (combined.index <= end_ts)].copy()
+    frame = frame.sort_index()
+    frame_start, frame_end = frame.index.min(), frame.index.max()
+    if frame_start > start_ts:
+        raise RuntimeError(
+            f"Stored data for {ticker} starts at {frame_start.date()}, "
+            f"which is after requested start {start_ts.date()}. "
+            "Refresh the cache or request a later start date."
+        )
+    effective_end = min(end_ts, frame_end)
+    return frame.loc[(frame.index >= start_ts) & (frame.index <= effective_end)].copy()
 
 
 def make_features(df):

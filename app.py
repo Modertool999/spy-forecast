@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backtest import run_strategy
+from price_store import get_available_span
 
 app = FastAPI()
 app.add_middleware(
@@ -34,10 +35,31 @@ async def spy_backtest(req: Request):
     end = payload.get("end")
 
     try:
-        result = run_strategy(threshold=threshold, start=start, end=end)
+        result = run_strategy(
+            threshold=threshold,
+            start=start,
+            end=end,
+            allow_remote_download=False,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive catch for API entrypoint
         raise HTTPException(status_code=500, detail="Backtest failed.") from exc
 
     return result
+
+
+@app.get("/api/spy-window")
+def spy_window():
+    span = get_available_span("SPY")
+    if not span:
+        raise HTTPException(
+            status_code=503,
+            detail="SPY price cache is empty. Seed the database before serving requests.",
+        )
+    start, end = span
+    return {
+        "ticker": "SPY",
+        "start": start.strftime("%Y-%m-%d"),
+        "end": end.strftime("%Y-%m-%d"),
+    }

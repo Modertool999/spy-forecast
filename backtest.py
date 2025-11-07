@@ -55,15 +55,23 @@ def run_strategy(
     threshold: float = 0.55,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    allow_remote_download: bool = False,
 ) -> Dict[str, object]:
     """
     Train the logistic regression model on SPY history and run the
     out-of-sample backtest. Returns compact JSON-friendly stats.
+    Set `allow_remote_download=True` to let the helper refresh prices
+    from yfinance; the API keeps it False to stay cache-only.
     """
     start_date = start or "2005-01-01"
     end_date = end or datetime.today().strftime("%Y-%m-%d")
 
-    price_data = download_price_data("SPY", start_date, end_date)
+    price_data = download_price_data(
+        "SPY",
+        start_date,
+        end_date,
+        allow_remote=allow_remote_download,
+    )
     X, y, returns = make_features(price_data)
 
     if X.empty:

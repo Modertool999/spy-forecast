@@ -36,3 +36,9 @@ python spy_nextday.py --threshold 0.55 --plot
 - plot (if you passed `--plot`)
 
 Mostly a learning exercise, but it’s neat to see how just a few features can already tell a story about market regime :D
+
+## Backend / API notes
+- The FastAPI app in `app.py` serves `/api/spy-backtest` for the GitHub Pages front-end.
+- Runtime calls never hit `yfinance`; instead they read from the bundled SQLite cache at `data/prices.db`.
+- Keep the cache fresh by running `python seed_prices.py --ticker SPY --start 2000-01-01 --end <YYYY-MM-DD>` locally before deploying. This script can still use `yfinance`.
+- If you need the API to refill data remotely (e.g., during development), call `backtest.run_strategy(..., allow_remote_download=True)`.
