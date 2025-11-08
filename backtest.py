@@ -139,6 +139,22 @@ def _ensure_strategy_cache(
     return _STRATEGY_CACHE
 
 
+def get_holdout_window(allow_remote_download: bool = False) -> tuple[str, str]:
+    """
+    Return the actual out-of-sample window (in YYYY-MM-DD) backed by cached data.
+    Forces the strategy cache to be hydrated so callers see the same bounds that
+    the backtest uses for every request.
+    """
+    today = pd.Timestamp(datetime.today().strftime("%Y-%m-%d"))
+    cache = _ensure_strategy_cache(allow_remote_download, today)
+    returns_test: pd.Series = cache["returns_test"]
+    if returns_test.empty:
+        raise ValueError("Holdout window unavailable; seed the price cache first.")
+    start = returns_test.index.min().strftime("%Y-%m-%d")
+    end = returns_test.index.max().strftime("%Y-%m-%d")
+    return start, end
+
+
 def run_strategy(
     threshold: float = 0.55,
     start: Optional[str] = None,

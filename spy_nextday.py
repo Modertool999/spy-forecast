@@ -197,7 +197,10 @@ def make_features(df):
     features["gap"] = (open_ / close.shift(1) - 1).shift(1)
     features["rsi14"] = compute_rsi(close).shift(1)
 
-    target = (ret1.shift(-1) > 0).astype(int)
+    # Align labels/returns with the horizon we can actually trade: each row's
+    # features use data through the prior close, so the target (and realized
+    # return) should reference the very next trading day.
+    target = (ret1 > 0).astype(int)
     target.name = "target"
     ret1.name = "ret1"
 

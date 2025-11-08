@@ -3,8 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from backtest import run_strategy
-from price_store import get_available_span
+from backtest import get_holdout_window, run_strategy
 
 app = FastAPI()
 app.add_middleware(
@@ -51,15 +50,15 @@ async def spy_backtest(req: Request):
 
 @app.get("/api/spy-window")
 def spy_window():
-    span = get_available_span("SPY")
-    if not span:
+    try:
+        start, end = get_holdout_window()
+    except ValueError as exc:
         raise HTTPException(
             status_code=503,
-            detail="SPY price cache is empty. Seed the database before serving requests.",
-        )
-    start, end = span
+            detail="Holdout window unavailable. Seed the price cache before serving requests.",
+        ) from exc
     return {
         "ticker": "SPY",
-        "start": start.strftime("%Y-%m-%d"),
-        "end": end.strftime("%Y-%m-%d"),
+        "start": start,
+        "end": end,
     }
