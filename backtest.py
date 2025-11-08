@@ -10,6 +10,7 @@ from spy_nextday import (
     backtest_long_flat,
     download_price_data,
     make_features,
+    risk_metrics,
     train_logit,
 )
 
@@ -105,6 +106,8 @@ def run_strategy(
         threshold=threshold,
         fee_bps=2.0,
     )
+    baseline_equity = (1 + returns_test).cumprod()
+    baseline_metrics = risk_metrics(returns_test)
 
     equity = backtest_results["equity"]
     metrics = backtest_results["metrics"]
@@ -116,12 +119,26 @@ def run_strategy(
     else:
         total_return = None
 
+    baseline_equity_list: List[float] = []
+    if not baseline_equity.empty:
+        baseline_equity_list = [float(val) for val in baseline_equity.round(6).values]
+        baseline_total_return = _safe_number(baseline_equity.iloc[-1])
+        if baseline_total_return is not None:
+            baseline_total_return -= 1.0
+    else:
+        baseline_total_return = None
+
     return {
         "equity": equity_list,
         "total_ret": _pct(total_return),
         "cagr": _pct(metrics.get("cagr")),
         "sharpe": _safe_number(metrics.get("sharpe")),
         "max_drawdown": _pct(metrics.get("max_drawdown")),
+        "baseline_equity": baseline_equity_list,
+        "baseline_total_ret": _pct(baseline_total_return),
+        "baseline_cagr": _pct(baseline_metrics.get("cagr")),
+        "baseline_sharpe": _safe_number(baseline_metrics.get("sharpe")),
+        "baseline_max_drawdown": _pct(baseline_metrics.get("max_drawdown")),
         "threshold": float(threshold),
         "start": start_date,
         "end": end_date,
