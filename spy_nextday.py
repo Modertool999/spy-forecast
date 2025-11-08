@@ -124,12 +124,17 @@ def download_price_data(ticker, start, end, retries=2, allow_remote=True):
                 "Local price cache is empty. Run `python seed_prices.py --ticker SPY` "
                 "to populate the SQLite store before using cache-only mode."
             )
-        missing_desc = ", ".join(f"{s.date()}-{e.date()}" for s, e in missing_segments)
-        raise ValueError(
-            f"Requested window {start_ts.date()} - {end_ts.date()} falls outside the cached span "
-            f"{cache_start.date()} - {cache_end.date()} (missing {missing_desc}). "
-            "Adjust the dates or refresh the cache via `python seed_prices.py`."
-        )
+        overlap_start = max(start_ts, cache_start)
+        overlap_end = min(end_ts, cache_end)
+        if overlap_start > overlap_end:
+            missing_desc = ", ".join(f"{s.date()}-{e.date()}" for s, e in missing_segments)
+            raise ValueError(
+                f"Requested window {start_ts.date()} - {end_ts.date()} does not overlap cached span "
+                f"{cache_start.date()} - {cache_end.date()} (missing {missing_desc}). "
+                "Adjust the dates or refresh the cache via `python seed_prices.py`."
+            )
+        start_ts, end_ts = overlap_start, overlap_end
+        missing_segments = []
 
     if allow_remote:
         for seg_start, seg_end in missing_segments:
