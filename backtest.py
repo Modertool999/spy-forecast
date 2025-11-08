@@ -6,13 +6,18 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from price_store import get_available_span
 from spy_nextday import (
+    DEFAULT_HISTORY_START,
     backtest_long_flat,
     download_price_data,
     make_features,
     risk_metrics,
     train_logit,
 )
+
+DEFAULT_TICKER = "SPY"
+DEFAULT_HISTORY_START_STR = DEFAULT_HISTORY_START.strftime("%Y-%m-%d")
 
 
 def _resolve_split_dates(index: pd.Index) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -52,6 +57,23 @@ def _pct(value: float | int | np.floating | None) -> Optional[float]:
     return val * 100.0
 
 
+def _resolve_requested_window(
+    start: Optional[str],
+    end: Optional[str],
+) -> tuple[str, str]:
+    """
+    Favors the cached SPY span so the API immediately reflects real bounds.
+    Falls back to the historical default and today's date when the cache is empty.
+    """
+    span = get_available_span(DEFAULT_TICKER)
+    fallback_start = DEFAULT_HISTORY_START_STR
+    fallback_end = datetime.today().strftime("%Y-%m-%d")
+    if span:
+        fallback_start = span[0].strftime("%Y-%m-%d")
+        fallback_end = span[1].strftime("%Y-%m-%d")
+    return start or fallback_start, end or fallback_end
+
+
 def run_strategy(
     threshold: float = 0.55,
     start: Optional[str] = None,
@@ -64,11 +86,10 @@ def run_strategy(
     Set `allow_remote_download=True` to let the helper refresh prices
     from yfinance; the API keeps it False to stay cache-only.
     """
-    start_date = start or "2005-01-01"
-    end_date = end or datetime.today().strftime("%Y-%m-%d")
+    start_date, end_date = _resolve_requested_window(start, end)
 
     price_data = download_price_data(
-        "SPY",
+        DEFAULT_TICKER,
         start_date,
         end_date,
         allow_remote=allow_remote_download,
