@@ -155,6 +155,9 @@ def download_price_data(ticker, start, end, retries=2, allow_remote=True):
                 filled = True
                 break
             if not filled:
+                if cursor > seg_end:
+                    # Segment only covered holidays/closed market days; nothing to backfill.
+                    continue
                 raise RuntimeError(
                     f"Failed to backfill prices for {ticker} between "
                     f"{seg_start.date()} and {seg_end.date()}."
@@ -168,14 +171,13 @@ def download_price_data(ticker, start, end, retries=2, allow_remote=True):
         )
     frame = frame.sort_index()
     frame_start, frame_end = frame.index.min(), frame.index.max()
-    if frame_start > start_ts:
+    effective_start = max(start_ts, frame_start)
+    if effective_start > end_ts:
         raise RuntimeError(
-            f"Stored data for {ticker} starts at {frame_start.date()}, "
-            f"which is after requested start {start_ts.date()}. "
-            "Refresh the cache or request a later start date."
+            f"Stored data for {ticker} starts at {frame_start.date()}, which is after requested end {end_ts.date()}."
         )
     effective_end = min(end_ts, frame_end)
-    return frame.loc[(frame.index >= start_ts) & (frame.index <= effective_end)].copy()
+    return frame.loc[(frame.index >= effective_start) & (frame.index <= effective_end)].copy()
 
 
 def make_features(df):

@@ -86,18 +86,21 @@ def run_strategy(
     Set `allow_remote_download=True` to let the helper refresh prices
     from yfinance; the API keeps it False to stay cache-only.
     """
-    start_date, end_date = _resolve_requested_window(start, end)
+    requested_start, requested_end = _resolve_requested_window(start, end)
 
     price_data = download_price_data(
         DEFAULT_TICKER,
-        start_date,
-        end_date,
+        requested_start,
+        requested_end,
         allow_remote=allow_remote_download,
     )
     X, y, returns = make_features(price_data)
 
     if X.empty:
         raise ValueError("Not enough price history to compute features.")
+
+    actual_start = price_data.index.min().strftime("%Y-%m-%d")
+    actual_end = price_data.index.max().strftime("%Y-%m-%d")
 
     split_train_end, split_valid_end = _resolve_split_dates(X.index)
 
@@ -161,6 +164,6 @@ def run_strategy(
         "baseline_sharpe": _safe_number(baseline_metrics.get("sharpe")),
         "baseline_max_drawdown": _pct(baseline_metrics.get("max_drawdown")),
         "threshold": float(threshold),
-        "start": start_date,
-        "end": end_date,
+        "start": actual_start,
+        "end": actual_end,
     }
